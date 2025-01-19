@@ -1,0 +1,5 @@
+langchain==0.0.190
+transformers==4.31.0
+sentence-transformers==2.2.2
+pypdf==3.9.1
+docx2txt==0.8
