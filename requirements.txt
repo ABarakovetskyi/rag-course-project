@@ -1,13 +1,12 @@
 langchain==0.0.190
-transformers==4.31.0
-
+transformers==4.29.0
 faiss-cpu==1.7.3
-huggingface-hub==0.14.1
+huggingface-hub==0.19.3
 sentence-transformers==2.2.2
 pypdf==3.9.1
 docx2txt==0.8
 pandas==2.0.3
 numpy==1.26.0
-
-rank-bm25==0.2.2 #BM25
+rank-bm25==0.2.2
+gradio==3.16.2
 
