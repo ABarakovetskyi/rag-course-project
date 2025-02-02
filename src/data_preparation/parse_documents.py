@@ -1,192 +1,180 @@
 import os
 import re
 import glob
-import pandas as pd
 import json
-
-# Для PDF
 import pypdf
-# Для DOCX
 import docx2txt
+import pandas as pd
 
+# LangChain TextSplitters
+from langchain.text_splitter import (
+    RecursiveCharacterTextSplitter,
+    CharacterTextSplitter
+)
 
-def anonymize_text(text):
-    """
-    Примітивне знеособлення ПІБ українською мовою.
-    Шукаємо:
-      1) [А-ЯҐЄІЇ][а-яґєії'’]+ \s+ [А-ЯҐЄІЇ]\.[А-ЯҐЄІЇ]\.
-         (наприклад, "Бараковецький А.В.")
-      2) [А-ЯҐЄІЇ][а-яґєії'’]+ \s+ [А-ЯҐЄІЇ]{2,}
-         (наприклад, "Андрій БАРАКОВЕЦЬКИЙ")
+# Для підрахунку токенів
+# pip install tiktoken
+import tiktoken
 
-    Замінюємо усе знайдене на "ПІБ_ЗНЕОСОБЛЕНО".
-    """
+# Приклад: використання енкодера для GPT-3.5
+ENCODER = tiktoken.encoding_for_model("gpt-3.5-turbo")
 
-    pattern = re.compile(
-        r"\b[А-ЯҐЄІЇ][а-яґєії'’]+\s+[А-ЯҐЄІЇ]\.[А-ЯҐЄІЇ]\."
-        r"|\b[А-ЯҐЄІЇ][а-яґєії'’]+\s+[А-ЯҐЄІЇ]{2,}\b",
-        flags=re.U
-    )
-    # Замінюємо знайдене на "ПІБ_ЗНЕОСОБЛЕНО"
-    anonymized = pattern.sub("ПІБ_ЗНЕОСОБЛЕНО", text)
-    return anonymized
-
+def count_tokens(text: str) -> int:
+    """Повертає приблизну кількість токенів тексту з урахуванням GPT-3.5."""
+    tokens = ENCODER.encode(text)
+    return len(tokens)
 
 def read_pdf(file_path):
     """
-    Зчитує PDF і повертає текст одним рядком.
+    Зчитує текст із PDF-сторінок і об'єднує в один рядок.
     """
     text_pages = []
-    with open(file_path, 'rb') as f:
+    with open(file_path, "rb") as f:
         reader = pypdf.PdfReader(f)
-        for page_num in range(len(reader.pages)):
-            page = reader.pages[page_num]
+        for page in reader.pages:
             page_text = page.extract_text()
             if page_text:
                 text_pages.append(page_text)
-    full_text = "\n".join(text_pages)
-    return full_text
-
+    return "\n".join(text_pages)
 
 def read_docx(file_path):
     """
-    Зчитує DOCX і повертає текст одним рядком.
+    Зчитує текст із DOCX-файлу.
     """
-    text = docx2txt.process(file_path)
-    return text if text else ""
+    return docx2txt.process(file_path) or ""
 
-
-def split_text_by_paragraphs(text):
+def clean_text(text: str) -> str:
     """
-    Розбиває текст за абзацами (два або більше переносів).
-    Повертає список абзаців (рядків) без порожніх.
+    1. Прибирає зайві порожні рядки.
+    2. Видаляє колонтитули, 'технічні' блоки, підписи, сертифікати тощо.
+       Налаштуйте регулярки під свої потреби.
     """
-    # Наприклад, два або більше \n
-    paragraphs = re.split(r'\n\s*\n+', text.strip())
-    paragraphs = [p.strip() for p in paragraphs if p.strip()]
-    return paragraphs
+    # Приклад: Видалити повторювані переводи рядків (2+ підряд) замінюючи на 1-2
+    text = re.sub(r'\n\s*\n+', '\n\n', text)
 
+    # Приклад: Видалити фрагменти з "Затверджую Голова Правління..."
+    # (?i) - регістронезалежний пошук
+    text = re.sub(r'(?i)затверджую голова правління.*?\n', '', text)
 
-def split_paragraph_into_subchunks(paragraph, max_words=300):
+    # Приклад: Видалити рядки з "Сертифікат:" + будь-який текст до кінця рядка
+    text = re.sub(r'(?i)сертифікат:.*', '', text)
+
+    # Приклад: Видалити підписи "документ підписаний ..."
+    text = re.sub(r'(?i)документ підписаний.*', '', text)
+
+    # Приклад: Видалити часові мітки формату "17:54"
+    text = re.sub(r'\b\d{1,2}:\d{2}\b', '', text)
+
+    # Приклад: Видалити зайві пробіли
+    text = re.sub(r'[ \t]+', ' ', text)
+
+    # Обрізаємо пробіли/переноси з початку та кінця
+    text = text.strip()
+    return text
+
+def choose_text_splitter(splitter_type="recursive", chunk_size=1000, chunk_overlap=200):
     """
-    Якщо абзац > max_words,
-    1) розбити його на речення за (.?!;),
-    2) об'єднати речення у блоки, де <= max_words слів.
+    Повертає потрібний TextSplitter із LangChain залежно від splitter_type:
+      - "recursive" -> RecursiveCharacterTextSplitter
+      - "character" -> CharacterTextSplitter
     """
-    sentences = re.split(r'(?<=[\.?!;])\s+', paragraph)
-
-    chunks = []
-    current_chunk = []
-    current_count = 0
-
-    for sentence in sentences:
-        words = re.split(r'\s+', sentence.strip())
-        if not words or all(w == '' for w in words):
-            continue
-
-        if current_count + len(words) > max_words:
-            chunks.append(" ".join(current_chunk))
-            current_chunk = words
-            current_count = len(words)
-        else:
-            current_chunk.extend(words)
-            current_count += len(words)
-
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
-    return chunks
+    if splitter_type == "character":
+        return CharacterTextSplitter(
+            separator="\n",
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap
+        )
+    else:  # "recursive" за замовчуванням
+        return RecursiveCharacterTextSplitter(
+            separators=["\n\n", "\n", ".", " ", ""],
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap
+        )
 
 
-def process_text(text, max_words=300):
+
+def parse_and_chunk_documents(
+    raw_docs_path="data/raw_docs",
+    output_folder="data/processed",
+    splitter_type="recursive",
+    chunk_size=1000,
+    chunk_overlap=200
+):
     """
-    1) Розбиває текст на абзаци,
-    2) Якщо абзац > max_words, розбиває на підшматки (речення) до max_words слів,
-    3) Повертає список chunks.
-    """
-    paragraphs = split_text_by_paragraphs(text)
-    all_chunks = []
-
-    for paragraph in paragraphs:
-        word_count = len(re.split(r'\s+', paragraph))
-        if word_count <= max_words:
-            all_chunks.append(paragraph)
-        else:
-            subchunks = split_paragraph_into_subchunks(paragraph, max_words=max_words)
-            all_chunks.extend(subchunks)
-    return all_chunks
-
-
-def parse_and_chunk_documents(raw_docs_path="data/raw_docs",
-                              output_folder="data/processed",
-                              max_words=300,
-                              anonymize=False):
-    """
-    Основна функція:
-      1) Знаходить PDF/DOCX файли у raw_docs_path
-      2) Читає та (за потреби) знеособлює text
-      3) Розбиває його на chunks
-      4) Зберігає у CSV та JSON (для подальшого RAG)
-
-    :param anonymize: Якщо True, викликаємо anonymize_text(text_data).
+    1. Збирає всі файли PDF/DOCX у папці raw_docs_path.
+    2. Зчитує та очищує текст.
+    3. Розбиває на чанки одним із TextSplitter (Recursive/Character/Spacy).
+    4. Підраховує токени кожного чанка.
+    5. Зберігає результати в CSV та JSON.
     """
     os.makedirs(output_folder, exist_ok=True)
 
-    pdf_files = glob.glob(os.path.join(raw_docs_path, "*.pdf"))
-    docx_files = glob.glob(os.path.join(raw_docs_path, "*.docx"))
+    # Обираємо потрібний TextSplitter
+    text_splitter = choose_text_splitter(
+        splitter_type=splitter_type,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap
+    )
 
     all_records = []
+    # Збираємо список PDF та DOCX файлів
+    files = glob.glob(os.path.join(raw_docs_path, "*.pdf")) + \
+            glob.glob(os.path.join(raw_docs_path, "*.docx"))
 
-    for pdf_file in pdf_files:
-        print(f"Reading PDF: {pdf_file}")
-        text_data = read_pdf(pdf_file)
+    for file_path in files:
+        print(f"Processing: {file_path}")
+        filename = os.path.basename(file_path)
 
-        # Знеособлення, якщо треба
-        if anonymize:
-            text_data = anonymize_text(text_data)
+        # 1) Зчитування
+        if file_path.endswith(".pdf"):
+            text_data = read_pdf(file_path)
+        else:
+            text_data = read_docx(file_path)
 
-        # Розбиваємо на chunks
-        chunks = process_text(text_data, max_words=max_words)
+        # 2) Очищення
+        text_data = clean_text(text_data)
+        if not text_data.strip():
+            # Якщо після очищення текст порожній, пропускаємо
+            continue
 
+        # 3) Розбиття на чанки
+        chunks = text_splitter.split_text(text_data)
+
+        # 4) Формуємо записи
         for idx, chunk in enumerate(chunks):
-            all_records.append({
-                "source_file": os.path.basename(pdf_file),
+            chunk_text = chunk.strip()
+            token_count = count_tokens(chunk_text)
+            record = {
+                "source_file": filename,
                 "chunk_id": idx,
-                "text_chunk": chunk
-            })
+                "text_chunk": chunk_text,
+                "token_count": token_count
+            }
+            all_records.append(record)
 
-    for docx_file in docx_files:
-        print(f"Reading DOCX: {docx_file}")
-        text_data = read_docx(docx_file)
+    # Якщо взагалі немає даних, уникаємо помилки при створенні DataFrame
+    if not all_records:
+        print("No text data found after parsing and cleaning.")
+        return
 
-        if anonymize:
-            text_data = anonymize_text(text_data)
-
-        chunks = process_text(text_data, max_words=max_words)
-
-        for idx, chunk in enumerate(chunks):
-            all_records.append({
-                "source_file": os.path.basename(docx_file),
-                "chunk_id": idx,
-                "text_chunk": chunk
-            })
-
-    # Зберігаємо в CSV
+    # 5) Збереження у CSV / JSON
     df = pd.DataFrame(all_records)
     csv_path = os.path.join(output_folder, "rag_chunks.csv")
     df.to_csv(csv_path, index=False, encoding='utf-8')
-    print(f"Chunks saved to CSV: {csv_path}")
 
-    # Додатково збережемо в JSON
     json_path = os.path.join(output_folder, "rag_chunks.json")
     df.to_json(json_path, orient='records', force_ascii=False, indent=2)
-    print(f"Chunks also saved to JSON: {json_path}")
 
+    print(f"Saved CSV: {csv_path}")
+    print(f"Saved JSON: {json_path}")
+    print(f"Total chunks generated: {len(all_records)}")
 
 if __name__ == "__main__":
-    # Приклад виклику:
+    # Приклад виклику з параметрами
     parse_and_chunk_documents(
         raw_docs_path="data/raw_docs",
         output_folder="data/processed",
-        max_words=300,
-        anonymize=True  # якщо треба вимкнути, поставити False
+        splitter_type="recursive",  # або "character", "spacy"
+        chunk_size=1000,
+        chunk_overlap=200
     )

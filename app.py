@@ -1,8 +1,8 @@
 import gradio as gr
 from src.rag_pipeline.rag_pipeline import RAGPipeline
-from transformers import pipeline as hf_pipeline
+from transformers import pipeline as hf_pipeline, GPT2Tokenizer
 
-# Ініціалізуємо RAG-пайплайн (за потреби налаштуйте параметри)
+# Ініціалізуємо RAG-пайплайн (налаштуйте параметри за потреби)
 rag = RAGPipeline(
     metadata_csv="data/index/faiss_index_metadata.csv",
     faiss_index_path="data/index/faiss_index.index",
@@ -13,14 +13,24 @@ rag = RAGPipeline(
 # Ініціалізуємо генератор тексту з безкоштовної моделі GPT-2
 generator = hf_pipeline("text-generation", model="gpt2")
 
+# Завантажуємо токенізатор GPT-2 для обрізання prompt-а
+tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+max_model_length = tokenizer.model_max_length  # Наприклад, 1024 для GPT-2
+
+def truncate_prompt(prompt: str) -> str:
+    """
+    Обрізає prompt до максимально допустимої кількості токенів для моделі.
+    """
+    tokens = tokenizer.encode(prompt, truncation=True, max_length=max_model_length)
+    return tokenizer.decode(tokens, skip_special_tokens=True)
 
 def get_response(query: str) -> str:
     """
-    Функція обробки запиту:
-      1. За допомогою RAG-пайплайну отримуємо релевантні фрагменти.
-      2. Формуємо prompt із включенням отриманих фрагментів та початкового запиту.
-      3. Викликаємо GPT-2 для генерації відповіді.
-      4. Повертаємо згенеровану відповідь разом із джерелами (source_file).
+    Обробка запиту:
+      1. Отримання релевантних фрагментів за допомогою RAG-пайплайну.
+      2. Формування prompt із включенням отриманих фрагментів та початкового запиту.
+      3. Виклик GPT-2 для генерації відповіді.
+      4. Повернення згенерованої відповіді разом із джерелами.
     """
     # Отримуємо кандидати (наприклад, 10 фрагментів) та робимо re-ranking
     candidates = rag.hybrid_search(query, top_k=10)
@@ -35,16 +45,18 @@ def get_response(query: str) -> str:
         prompt += f"- {frag['text_chunk']}\n"
     prompt += f"\nЗапит: {query}\nВідповідь: "
 
+    # Обрізаємо prompt, щоб він не перевищував максимально допустиму довжину
+    prompt = truncate_prompt(prompt)
+
     # Викликаємо LLM (GPT-2) для генерації відповіді
     output = generator(prompt, max_length=250, do_sample=True, top_p=0.9, num_return_sequences=1)
     answer = output[0]['generated_text']
 
-    # Формуємо список джерел (за бажанням)
+    # Формуємо список джерел (source_file)
     sources = "\n".join([f"Файл: {frag['source_file']}" for frag in top_fragments])
 
     full_response = answer + "\n\nДжерела:\n" + sources
     return full_response
-
 
 # Налаштовуємо Gradio інтерфейс
 iface = gr.Interface(
