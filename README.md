@@ -1,83 +1,67 @@
-# RAG-Course-Project
-
-Цей проєкт демонструє **Retrieval-Augmented Generation (RAG)**‑підхід для роботи з українськомовними документами.  
-Поточна реалізація використовує:
-
-- **Sentence Transformers** (модель `paraphrase-multilingual-MiniLM-L12-v2`) для ембедингів  
-- **FAISS** для векторного пошуку  
-- **LangChain** і **transformers** (за потреби)  
-
----
-
-## **Інструкції з використання**
-
-### **1. Клонування репозиторію та встановлення залежностей**
-```bash
+Інструкції з використання
+1. Клонування репозиторію
+bash
+Копіювати
+Редагувати
 git clone https://github.com/username/rag-course-project.git
 cd rag-course-project
 
- ### **2. Створення та активація віртуального середовища (venv)**
-
+2. Створення та активація venv
+bash
+Копіювати
+Редагувати
 python -m venv new_venv
 # Windows:
 .\new_venv\Scripts\activate
 # macOS/Linux:
 source new_venv/bin/activate
-
-### **3. Встановлення залежностей**
-
+3. Встановлення залежностей
+bash
+Копіювати
+Редагувати
 pip install --upgrade pip
 pip install -r requirements.txt
+4. Підготовка документів
 
-### **4. Попередня обробка документів**
-
-1.) Помістіть усі ваші PDF/DOCX у папку data/raw_docs.
-2.) Запустіть скрипт для створення шматків (chunks):
-
+Покладіть PDF/DOCX у папку data/raw_docs.
+Запустіть parse_documents.py, щоб зчитати й нарізати chunks:
+bash
+Копіювати
+Редагувати
 python src/data_preparation/parse_documents.py
+Результати:
 
-Скрипт розіб’є PDF/DOCX на шматки та збереже їх у data/processed/rag_chunks.csv (також у форматі .json).
-Опціонально: можна ввімкнути/вимкнути знеособлення ПІБ.
+rag_chunks.csv / rag_chunks.json у data/processed/ (із полями chunk, source_file).
+5. Створення ембеддингів та FAISS-індексу
+Запустіть:
 
-### **5. Створення ембедингів та FAISS-індексу**
-
-1.) Запустіть: python src/indexing/create_embeddings.py
-Цей скрипт:
-
-- Зчитає rag_chunks.csv.
-- Обчислить ембединги (модель paraphrase-multilingual-MiniLM-L12-v2).
-- Збереже FAISS-індекс у data/index/faiss_index.index.
-- Збереже метадані у data/index/faiss_index_metadata.csv.
-
-Очікуваний вивід:
-
-FAISS index size: ...
-Індекс збережено.
-
-### **6. Пошук у FAISS (query_index.py)**
-
-
-Файл query_index.py містить функцію query_faiss(query, index_path, top_k=3), яка:
-
-1.)Читає індекс faiss_index.index.
-2.) Обчислює ембединг запиту.
-3.) Виконує пошук у FAISS і повертає найбільш схожі chunks.
-
-Для тестування: python src/indexing/query_index.py
-
-Приклад виводу:
-Rank 1 | score=5.25377
-source_file: Інженера 2 категорії групиHR.pdf
-...
-Rank 2 ...
-...
-
-### **7. Наступні кроки**
-
-Для інтеграції з LLM (GPT-4, Llama та ін.) можна створити RAG-пайплайн:
-
-Користувач вводить запит.
-Знаходимо найближчі chunks у FAISS.
-Формуємо prompt + chunks.
-Генеруємо відповідь (через OpenAI API чи локальну модель).
-Це можна реалізувати у файлі rag_pipeline.py.
+bash
+Копіювати
+Редагувати
+python src/indexing/create_embeddings.py
+Зчитає (за замовчуванням) rag_chunks.json (чи .csv)
+Використає модель distiluse-base-multilingual-cased-v2 (можна змінити в коді).
+Створить faiss_index.index + faiss_index_metadata.csv у data/index.
+6. Тестовий запуск RAG-пайплайну (необов’язково)
+bash
+Копіювати
+Редагувати
+python src/rag_pipeline/rag_pipeline.py
+Може завантажити індекс, виконати hybrid_search(query), роздрукувати результати.
+Перевірте, чи знаходить потрібні chunks.
+7. Запуск веб‑додатку Gradio
+bash
+Копіювати
+Редагувати
+python app.py
+Відкрийте http://127.0.0.1:7860.
+Введіть запит (наприклад, «Які обов’язки начальника сектору СЕД та УП?»).
+Система знайде chunks → GPT‑2 згенерує відповідь → відобразить у інтерфейсі.
+8. Налаштування моделей
+В create_embeddings.py можна змінити модель (model_name) і use_cosine.
+У rag_pipeline.py відповідно в конструкторі передати use_cosine=True/False і embedding_model=....
+У app.py можна змінити генеративну модель із gpt2 на щось більше (наприклад, Bloom), або ж підключити API OpenAI.
+Додаткові відомості
+Якщо модель GPT‑2 «галюцинує» або дає не надто якісні відповіді – розгляньте більшу LLM (GPT‑3.5 через API, Bloom, T5).
+Якщо у вас великі дані (більше 10–100 тис. chunks), можна переходити до індексів Faiss типу IVF чи HNSW.
+rank-bm25 використовуєть!ся для текст!ового пошуку (BM25) і CrossEncoder – для re-rank.![img_2.png](img_2.png)![img_3.png](img_3.png)

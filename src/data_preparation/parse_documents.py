@@ -1,180 +1,172 @@
 import os
-import re
-import glob
+import csv
 import json
-import pypdf
-import docx2txt
-import pandas as pd
 
-# LangChain TextSplitters
-from langchain.text_splitter import (
-    RecursiveCharacterTextSplitter,
-    CharacterTextSplitter
-)
+try:
+    import docx
+except ImportError:
+    print("Встановіть бібліотеку python-docx: pip install python-docx")
 
-# Для підрахунку токенів
-# pip install tiktoken
-import tiktoken
+try:
+    import PyPDF2
+except ImportError:
+    print("Встановіть бібліотеку PyPDF2: pip install PyPDF2")
 
-# Приклад: використання енкодера для GPT-3.5
-ENCODER = tiktoken.encoding_for_model("gpt-3.5-turbo")
-
-def count_tokens(text: str) -> int:
-    """Повертає приблизну кількість токенів тексту з урахуванням GPT-3.5."""
-    tokens = ENCODER.encode(text)
-    return len(tokens)
-
-def read_pdf(file_path):
+def read_docx(file_path: str) -> str:
     """
-    Зчитує текст із PDF-сторінок і об'єднує в один рядок.
+    Зчитує текст із .docx файлу за допомогою python-docx
     """
-    text_pages = []
-    with open(file_path, "rb") as f:
-        reader = pypdf.PdfReader(f)
-        for page in reader.pages:
+    doc = docx.Document(file_path)
+    full_text = []
+    for para in doc.paragraphs:
+        full_text.append(para.text)
+    return "\n".join(full_text)
+
+def read_pdf(file_path: str) -> str:
+    """
+    Зчитує текст із PDF-файлу за допомогою PyPDF2.
+    Якщо PDF – це скан, може знадобитися PDF + OCR (pdfplumber + pytesseract).
+    """
+    text = ""
+    with open(file_path, 'rb') as f:
+        reader = PyPDF2.PdfReader(f)
+        for page_num in range(len(reader.pages)):
+            page = reader.pages[page_num]
             page_text = page.extract_text()
             if page_text:
-                text_pages.append(page_text)
-    return "\n".join(text_pages)
-
-def read_docx(file_path):
-    """
-    Зчитує текст із DOCX-файлу.
-    """
-    return docx2txt.process(file_path) or ""
-
-def clean_text(text: str) -> str:
-    """
-    1. Прибирає зайві порожні рядки.
-    2. Видаляє колонтитули, 'технічні' блоки, підписи, сертифікати тощо.
-       Налаштуйте регулярки під свої потреби.
-    """
-    # Приклад: Видалити повторювані переводи рядків (2+ підряд) замінюючи на 1-2
-    text = re.sub(r'\n\s*\n+', '\n\n', text)
-
-    # Приклад: Видалити фрагменти з "Затверджую Голова Правління..."
-    # (?i) - регістронезалежний пошук
-    text = re.sub(r'(?i)затверджую голова правління.*?\n', '', text)
-
-    # Приклад: Видалити рядки з "Сертифікат:" + будь-який текст до кінця рядка
-    text = re.sub(r'(?i)сертифікат:.*', '', text)
-
-    # Приклад: Видалити підписи "документ підписаний ..."
-    text = re.sub(r'(?i)документ підписаний.*', '', text)
-
-    # Приклад: Видалити часові мітки формату "17:54"
-    text = re.sub(r'\b\d{1,2}:\d{2}\b', '', text)
-
-    # Приклад: Видалити зайві пробіли
-    text = re.sub(r'[ \t]+', ' ', text)
-
-    # Обрізаємо пробіли/переноси з початку та кінця
-    text = text.strip()
+                text += page_text + "\n"
     return text
 
-def choose_text_splitter(splitter_type="recursive", chunk_size=1000, chunk_overlap=200):
+def chunk_text(text: str, chunk_size: int = 2000, overlap: int = 200) -> list:
     """
-    Повертає потрібний TextSplitter із LangChain залежно від splitter_type:
-      - "recursive" -> RecursiveCharacterTextSplitter
-      - "character" -> CharacterTextSplitter
+    Розбиває рядок `text` на список шматків (chunk-ів) з урахуванням:
+      - макс. довжини `chunk_size`
+      - перекриття `overlap`
+      - розриву chunk-ів по пробілах/переносах (щоб не різати слова всередині).
+
+    Якщо трапляється дуже довге слово, chunk все одно може взяти його цілим.
     """
-    if splitter_type == "character":
-        return CharacterTextSplitter(
-            separator="\n",
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap
-        )
-    else:  # "recursive" за замовчуванням
-        return RecursiveCharacterTextSplitter(
-            separators=["\n\n", "\n", ".", " ", ""],
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap
-        )
+    chunks = []
+    text_length = len(text)
+    start = 0
+
+    while start < text_length:
+        # Межа chunk-а "спочатку"
+        end = min(start + chunk_size, text_length)
+
+        if end < text_length:
+            # Перевіряємо, чи не закінчуємо chunk всередині слова
+            # Якщо символ text[end] - не пробіл і не перевідрядка, рухаємося назад.
+            temp_end = end
+            while temp_end > start and not text[temp_end].isspace():
+                temp_end -= 1
+
+            # Якщо temp_end == start, це означає, що слово довше за chunk_size,
+            # тому відкотитися до пробілу неможливо - chunk візьме весь [start:end].
+            if temp_end > start:
+                end = temp_end
+
+        chunk = text[start:end].rstrip()  # strip вправо, щоб уникнути зайвих пробілів
+
+        # Додаємо, тільки якщо chunk непорожній
+        if chunk:
+            chunks.append(chunk)
+
+        # Якщо досягнули кінця тексту, завершуємо
+        if end >= text_length:
+            break
+
+        # Обчислюємо новий start з урахуванням overlap
+        # (якщо end == start + chunk_size, наступний початок = end - overlap)
+        start = max(end - overlap, end)  # щоб уникнути start < end
+
+        if start >= text_length:
+            break
+
+    return chunks
 
 
-
-def parse_and_chunk_documents(
-    raw_docs_path="data/raw_docs",
-    output_folder="data/processed",
-    splitter_type="recursive",
-    chunk_size=1000,
-    chunk_overlap=200
-):
+def process_file(file_path: str,
+                 chunk_size: int = 2000,
+                 overlap: int = 200) -> list:
     """
-    1. Збирає всі файли PDF/DOCX у папці raw_docs_path.
-    2. Зчитує та очищує текст.
-    3. Розбиває на чанки одним із TextSplitter (Recursive/Character/Spacy).
-    4. Підраховує токени кожного чанка.
-    5. Зберігає результати в CSV та JSON.
+    Залежно від розширення файлу (.docx або .pdf),
+    зчитує текст і нарізає його на chunk-и.
+    Повертає список рядків (кожен chunk).
     """
-    os.makedirs(output_folder, exist_ok=True)
+    base, ext = os.path.splitext(file_path)
+    ext = ext.lower()
 
-    # Обираємо потрібний TextSplitter
-    text_splitter = choose_text_splitter(
-        splitter_type=splitter_type,
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap
-    )
+    if ext == ".docx":
+        text_data = read_docx(file_path)
+    elif ext == ".pdf":
+        text_data = read_pdf(file_path)
+    else:
+        # Пропускаємо інші формати
+        return []
 
-    all_records = []
-    # Збираємо список PDF та DOCX файлів
-    files = glob.glob(os.path.join(raw_docs_path, "*.pdf")) + \
-            glob.glob(os.path.join(raw_docs_path, "*.docx"))
+    return chunk_text(text_data, chunk_size=chunk_size, overlap=overlap)
 
-    for file_path in files:
-        print(f"Processing: {file_path}")
-        filename = os.path.basename(file_path)
+def save_chunks_to_csv(chunks_info: list, csv_path: str):
+    """
+    Зберігає список словників (із ключами 'chunk' та 'source_file') у CSV (UTF-8 з BOM),
+    щоб відкривати без проблем у Excel.
+    """
+    with open(csv_path, mode='w', encoding='utf-8-sig', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['chunk', 'source_file'])
+        writer.writeheader()
+        for row in chunks_info:
+            writer.writerow(row)
 
-        # 1) Зчитування
-        if file_path.endswith(".pdf"):
-            text_data = read_pdf(file_path)
-        else:
-            text_data = read_docx(file_path)
+def save_chunks_to_json(chunks_info: list, json_path: str):
+    """
+    Зберігає список словників (із ключами 'chunk' та 'source_file') у JSON (UTF-8).
+    """
+    with open(json_path, mode='w', encoding='utf-8') as f:
+        json.dump(chunks_info, f, ensure_ascii=False, indent=2)
 
-        # 2) Очищення
-        text_data = clean_text(text_data)
-        if not text_data.strip():
-            # Якщо після очищення текст порожній, пропускаємо
-            continue
+def convert_csv_cp1251_to_utf8(src_path: str, dst_path: str):
+    """
+    Конвертація CSV з Windows-1251 (cp1251) у UTF-8.
+    Якщо файл справді збережений у cp1251, тоді буде ОК.
+    """
+    with open(src_path, 'r', encoding='cp1251', errors='replace') as src_file:
+        content = src_file.read()
 
-        # 3) Розбиття на чанки
-        chunks = text_splitter.split_text(text_data)
+    with open(dst_path, 'w', encoding='utf-8', newline='') as dst_file:
+        dst_file.write(content)
 
-        # 4) Формуємо записи
-        for idx, chunk in enumerate(chunks):
-            chunk_text = chunk.strip()
-            token_count = count_tokens(chunk_text)
-            record = {
-                "source_file": filename,
-                "chunk_id": idx,
-                "text_chunk": chunk_text,
-                "token_count": token_count
-            }
-            all_records.append(record)
+    print(f"Файл {src_path} сконвертовано з cp1251 у {dst_path} (UTF-8).")
 
-    # Якщо взагалі немає даних, уникаємо помилки при створенні DataFrame
-    if not all_records:
-        print("No text data found after parsing and cleaning.")
-        return
-
-    # 5) Збереження у CSV / JSON
-    df = pd.DataFrame(all_records)
-    csv_path = os.path.join(output_folder, "rag_chunks.csv")
-    df.to_csv(csv_path, index=False, encoding='utf-8')
-
-    json_path = os.path.join(output_folder, "rag_chunks.json")
-    df.to_json(json_path, orient='records', force_ascii=False, indent=2)
-
-    print(f"Saved CSV: {csv_path}")
-    print(f"Saved JSON: {json_path}")
-    print(f"Total chunks generated: {len(all_records)}")
 
 if __name__ == "__main__":
-    # Приклад виклику з параметрами
-    parse_and_chunk_documents(
-        raw_docs_path="data/raw_docs",
-        output_folder="data/processed",
-        splitter_type="recursive",  # або "character", "spacy"
-        chunk_size=1000,
-        chunk_overlap=200
-    )
+    raw_docs_folder = os.path.join("data", "raw_docs")
+    processed_folder = os.path.join("data", "processed")
+    os.makedirs(processed_folder, exist_ok=True)
+
+    csv_out = os.path.join(processed_folder, "rag_chunks.csv")
+    json_out = os.path.join(processed_folder, "rag_chunks.json")
+
+    all_chunks = []
+
+    # Обробляємо всі docx/pdf у папці raw_docs
+    for filename in os.listdir(raw_docs_folder):
+        if not filename.lower().endswith((".docx", ".pdf")):
+            print(f"Пропускаємо непідтримуваний формат файлу: {filename}")
+            continue
+
+        file_path = os.path.join(raw_docs_folder, filename)
+        print(f"Обробляємо файл: {file_path}")
+
+        chunks = process_file(file_path, chunk_size=2000, overlap=200)
+        for ch in chunks:
+            all_chunks.append({
+                "chunk": ch,
+                "source_file": filename
+            })
+
+    # Зберігаємо результати у CSV та JSON
+    save_chunks_to_csv(all_chunks, csv_out)
+    save_chunks_to_json(all_chunks, json_out)
+
+    print(f"Готово! Збережено {len(all_chunks)} chunks до:\n  {csv_out}\n  {json_out}")
