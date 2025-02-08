@@ -1,3 +1,26 @@
+RAG-Course-Project
+Цей проєкт демонструє Retrieval-Augmented Generation (RAG)-підхід для роботи з документами (DOCX/PDF) переважно українською мовою. Мета – швидко знаходити відповідні фрагменти з локальної бази (через BM25 + векторний пошук) і доповнювати відповідь генеративною моделлю (GPT‑2 або іншою LLM).
+
+Основні компоненти
+Парсинг документів:
+
+parse_documents.py: зчитує DOCX/PDF, розбиває на частини (chunks) приблизно по 2000 символів, уникає розриву слів на межах.
+Результат: rag_chunks.csv / rag_chunks.json у папці data/processed/.
+Створення ембеддингів і FAISS-індексу:
+
+create_embeddings.py: бере rag_chunks.csv/rag_chunks.json, обчислює ембеддинги (SentenceTransformer, за замовчуванням distiluse-base-multilingual-cased-v2), створює FAISS-індекс (IndexFlatIP або IndexFlatL2).
+Параметр use_cosine=True вмикає нормалізацію векторів і IndexFlatIP (фактично косинусна схожість).
+Вихід: faiss_index.index та faiss_index_metadata.csv.
+RAG-пайплайн:
+
+rag_pipeline.py:
+Завантажує метадані й FAISS-індекс.
+Містить hybrid_search (BM25 → top_n, потім векторний пошук), vector_search (прямий пошук у FAISS) і re-rank (CrossEncoder).
+Повертає релевантні chunks, які можна використати для генерації відповіді.
+Демо‑додаток:
+
+app.py: Gradio-вебінтерфейс, що приймає запит, викликає rag_pipeline (hybrid_search + re-rank), бере top-3 chunks → формує prompt для GPT‑2, обрізає prompt, щоб не перевищувати 1024 токенів, і генерує фінальну відповідь.
+Виводить «Відповідь від LLM» + «Список джерел».
 Інструкції з використання
 1. Клонування репозиторію
 bash
@@ -5,7 +28,6 @@ bash
 Редагувати
 git clone https://github.com/username/rag-course-project.git
 cd rag-course-project
-
 2. Створення та активація venv
 bash
 Копіювати
@@ -22,7 +44,6 @@ bash
 pip install --upgrade pip
 pip install -r requirements.txt
 4. Підготовка документів
-
 Покладіть PDF/DOCX у папку data/raw_docs.
 Запустіть parse_documents.py, щоб зчитати й нарізати chunks:
 bash
@@ -64,4 +85,4 @@ python app.py
 Додаткові відомості
 Якщо модель GPT‑2 «галюцинує» або дає не надто якісні відповіді – розгляньте більшу LLM (GPT‑3.5 через API, Bloom, T5).
 Якщо у вас великі дані (більше 10–100 тис. chunks), можна переходити до індексів Faiss типу IVF чи HNSW.
-rank-bm25 використовуєть!ся для текст!ового пошуку (BM25) і CrossEncoder – для re-rank.![img_2.png](img_2.png)![img_3.png](img_3.png)
+rank-bm25 використовується для текстового пошуку (BM25) і CrossEncoder – для re-rank.
