@@ -1,102 +1,105 @@
 import gradio as gr
-from transformers import pipeline as hf_pipeline, GPT2Tokenizer
+import subprocess
 import traceback
 
-# Імпорт нашого RAGPipeline
-# Припустимо, ви зберегли його як src.rag_pipeline.rag_pipeline, де вже додано логіку use_cosine
 from src.rag_pipeline.rag_pipeline import RAGPipeline
 
-# Ініціалізація (налаштуйте параметри відповідно до вашої конфігурації)
+MODEL_NAME = "mistral:7b-instruct"  # назва моделі в ollama
+OLLAMA_TEMPERATURE = "0.2"  # знижує "творчість"
+
 rag = RAGPipeline(
     metadata_csv="data/index/faiss_index_metadata.csv",
     faiss_index_path="data/index/faiss_index.index",
-    embedding_model="sentence-transformers/distiluse-base-multilingual-cased-v2",
-    cross_encoder_model="cross-encoder/ms-marco-MiniLM-L-12-v2",
     bm25_enable=True,
     re_ranker_enable=True,
-    use_cosine=True  # якщо у create_embeddings.py ви також вмикали use_cosine
+    use_cosine=True
 )
 
-# Ініціалізуємо текстовий генератор із GPT-2 (або іншу модель, якщо бажано)
-generator = hf_pipeline("text-generation", model="gpt2")
 
-# Токенізатор GPT-2, щоби контролювати довжину промпту
-tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-max_model_length = tokenizer.model_max_length  # 1024 для GPT-2
+def generate_ollama(prompt: str) -> str:
+    """
+    Виклик ollama CLI. Повертає відповідь.
+    """
+    try:
+        cmd = [
+            "ollama",
+            "run",
+            MODEL_NAME
+        ]
+        result = subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8")
+
+        if result.returncode != 0:
+            return f"Ollama error: {result.stderr}"
+        return result.stdout.strip()
+    except Exception as e:
+        return f"Error calling ollama: {e}"
+
 
 def get_response(query: str):
-    """
-    1) Використовуємо RAG-пайплайн для пошуку (hybrid_search + re_rank).
-    2) Беремо топ-3 фрагменти => формуємо промпт.
-    3) Обрізаємо промпт, щоб уникнути 'index out of range' в GPT-2.
-    4) Генеруємо відповідь GPT-2.
-    5) Формуємо список джерел (Markdown).
-    """
     if not query.strip():
         return ("Будь ласка, введіть запит", "")
 
     try:
-        print(f"[DEBUG] Отримано запит: {query}")
-
-        # 1) Hybrid search
-        candidates = rag.hybrid_search(query, top_k=10)
+        # 1) Hybrid search з top_k=8, щоб отримати більше кандидатів
+        # (далі re-rank та фільтруємо)
+        candidates = rag.hybrid_search(query, top_k=8)
         if not candidates:
             return "Нічого не знайдено для вашого запиту", ""
 
-        # 2) Re-rank (cross-encoder)
+        # 2) Re-rank
         candidates = rag.re_rank(query, candidates)
-        top_fragments = candidates[:3]
-        print(f"[DEBUG] Знайдено {len(candidates)} кандидатів. Беремо top-3 фрагменти.")
 
-        # Формуємо промпт
-        prompt = "Використовуючи наступні фрагменти:\n"
+        # 3) Опційна фільтрація за схожістю (score), щоб відкинути низькорелевантні chunks
+        #   Напр.: беремо лише ті, в яких score > 0.2
+        filtered = [c for c in candidates if c["score"] > 0.2]
+
+        # Якщо після фільтра лишилося занадто мало, fallback:
+        if len(filtered) < 3:
+            # Якщо надто агресивна фільтрація, візьмемо хоч щось
+            filtered = candidates
+
+        # 4) Візьмемо top-5 замість 3
+        top_fragments = filtered[:5]
+
+        # 5) Формуємо розширену інструкцію:
+        prompt = """Ти відповідаєш лише на основі наведених фрагментів.
+Не додавай жодної вигаданої інформації. Відповідай коротко і чітко.
+Якщо немає інформації, напиши "Я не знаю".
+Ось фрагменти:\n\n"""
         for frag in top_fragments:
             prompt += f"- {frag['text_chunk']}\n"
+
         prompt += f"\nЗапит: {query}\nВідповідь: "
 
-        # 3) Обрізаємо промпт, щоб не перевищувати 1024 токени (GPT-2 контекст)
-        desired_gen_tokens = 80
-        max_allowed = max_model_length - desired_gen_tokens
+        # Для діагностики
+        print("================ PROMPT ===============")
+        print(prompt)
+        print("========================================")
 
-        tokens_prompt = tokenizer.encode(prompt)
-        if len(tokens_prompt) > max_allowed:
-            tokens_prompt = tokens_prompt[:max_allowed]
-        truncated_prompt = tokenizer.decode(tokens_prompt)
+        # Викликаємо ollama
+        answer = generate_ollama(prompt)
 
-        # 4) Генеруємо відповідь
-        output = generator(
-            truncated_prompt,
-            max_new_tokens=desired_gen_tokens,
-            do_sample=True,
-            top_p=0.9,
-            num_return_sequences=1
-        )
-        answer = output[0]['generated_text']
-
-        # 5) Формуємо список джерел
+        # Формуємо список джерел
         sources_md = "### Список джерел\n"
         for frag in top_fragments:
-            src_file = frag["source_file"]
-            # Припускаємо, що файли лежать у raw_docs, і в UI хочемо дати лінк
-            sources_md += f"- [{src_file}](raw_docs/{src_file})\n"
+            sources_md += f"- [{frag['source_file']}](raw_docs/{frag['source_file']})\n"
 
         return answer, sources_md
 
     except Exception as e:
-        print("=== EXCEPTION CAUGHT ===")
         traceback.print_exc()
         return f"Сталася помилка: {e}", ""
 
-# Налаштуємо Gradio інтерфейс
+
 iface = gr.Interface(
     fn=get_response,
     inputs=gr.Textbox(label="Введіть запит"),
     outputs=[
-        gr.Textbox(label="Відповідь від LLM"),
+        gr.Textbox(label="Відповідь від Ollama LLM"),
         gr.Markdown(label="Список джерел")
     ],
-    title="RAG Pipeline Demo (Truncate Prompt)",
-    description="Demonstration of RAG + GPT-2, with prompt-truncation to avoid exceeding the 1024 token limit of GPT-2."
+    title="RAG Pipeline Demo (Ollama)",
+    description="Demonstration of RAG with local LLM via Ollama. Prompt engineering, top_k=5, filtering low-score fragments."
 )
 
 if __name__ == "__main__":

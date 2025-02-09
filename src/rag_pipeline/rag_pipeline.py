@@ -16,8 +16,7 @@ class RAGPipeline:
                  use_cosine=True):
         """
         - metadata_csv, faiss_index_path: шляхи до CSV і FAISS-індексу.
-        - embedding_model: модель SentenceTransformer, що має збігатися з тією,
-          якою ви створювали FAISS-індекс.
+        - embedding_model: модель SentenceTransformer.
         - cross_encoder_model: модель для re-rank (пошуковий cross-енкодер).
         - bm25_enable, re_ranker_enable: вмикають BM25 і re-rank.
         - use_cosine: якщо True, припускаємо, що FAISS-індекс створений із cosine similarity
@@ -52,19 +51,19 @@ class RAGPipeline:
     def hybrid_search(self, query, top_k=5):
         """
         Двоетапний пошук:
-          1) BM25 => беремо top_n (50)
+          1) BM25 => беремо top_n (100)
           2) Векторний пошук серед цих top_n
         """
         if not self.bm25_enable:
             # Якщо вимкнено BM25
             return self.vector_search(query, top_k=top_k)
 
-        # 1) BM25 -> топ-50
+        # 1) BM25 -> топ-100
         tokenized_query = query.split()
         scores = self.bm25.get_scores(tokenized_query)
         # сортуємо за спаданням
         indices_sorted = np.argsort(scores)[::-1]
-        top_n = 50
+        top_n = 100
         top_n_indices = indices_sorted[:top_n]
 
         # 2) Векторний пошук серед цих 50
@@ -166,7 +165,7 @@ if __name__ == "__main__":
     )
 
     query = "Який обов’язок начальника сектору СЕД та УП?"
-    candidates = pipeline.hybrid_search(query, top_k=10)
+    candidates = pipeline.hybrid_search(query, top_k=8)
     final_reranked = pipeline.re_rank(query, candidates)
 
     for i, res in enumerate(final_reranked[:3]):
