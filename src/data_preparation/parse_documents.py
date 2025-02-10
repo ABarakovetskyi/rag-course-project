@@ -12,15 +12,39 @@ try:
 except ImportError:
     print("Встановіть бібліотеку PyPDF2: pip install PyPDF2")
 
-def read_docx(file_path: str) -> str:
+SECTION_HEADERS = [
+    "ЗАГАЛЬНІ ПОЛОЖЕННЯ",
+    "ЗАВДАННЯ ТА ОБОВ’ЯЗКИ",
+    "ПРАВА",
+    "ВІДПОВІДАЛЬНІСТЬ",
+    "ВЗАЄМОВІДНОСИНИ",
+    "ПОВИНЕН ЗНАТИ",
+    "КВАЛІФІКАЦІЙНІ ВИМОГИ"
+]
+
+
+def read_docx_with_tables(file_path: str) -> str:
     """
-    Зчитує текст із .docx файлу за допомогою python-docx
+    Зчитує текст і таблиці з .docx файлу у порядку їх розташування.
     """
     doc = docx.Document(file_path)
     full_text = []
-    for para in doc.paragraphs:
-        full_text.append(para.text)
+
+    for element in doc.element.body:
+        if element.tag.endswith('p'):  # Якщо абзац
+            paragraph = docx.text.paragraph.Paragraph(element, doc)
+            full_text.append(paragraph.text.strip())
+        elif element.tag.endswith('tbl'):  # Якщо таблиця
+            table = docx.table.Table(element, doc)
+            table_text = []
+            for row in table.rows:
+                row_text = [cell.text.strip() for cell in row.cells]
+                table_text.append(" | ".join(row_text))
+            full_text.append("\n".join(table_text))  # Додаємо таблицю як текст
+
     return "\n".join(full_text)
+
+
 
 def read_pdf(file_path: str) -> str:
     """
@@ -37,75 +61,72 @@ def read_pdf(file_path: str) -> str:
                 text += page_text + "\n"
     return text
 
-def chunk_text(text: str, chunk_size: int = 2000, overlap: int = 200) -> list:
-    """
-    Розбиває рядок `text` на список шматків (chunk-ів) з урахуванням:
-      - макс. довжини `chunk_size`
-      - перекриття `overlap`
-      - розриву chunk-ів по пробілах/переносах (щоб не різати слова всередині).
 
-    Якщо трапляється дуже довге слово, chunk все одно може взяти його цілим.
+def split_into_sections(text: str) -> list:
+    """
+    Розділяє текст на секції на основі заголовків із SECTION_HEADERS.
+    """
+    import re
+
+    # Об'єднуємо заголовки в єдиний регулярний вираз (ігноруємо регістр)
+    header_pattern = re.compile(rf"({'|'.join(SECTION_HEADERS)})", re.IGNORECASE)
+
+    sections = []
+    current_section = ""
+    lines = text.split("\n")
+
+    for line in lines:
+        if header_pattern.match(line.strip()):
+            if current_section:
+                sections.append(current_section.strip())
+            current_section = line.strip() + "\n"
+        else:
+            current_section += line + "\n"
+
+    if current_section:
+        sections.append(current_section.strip())
+
+    return sections
+
+
+def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> list:
+    """
+    Розбиває текст на фрагменти, включаючи таблиці у відповідні розділи.
     """
     chunks = []
-    text_length = len(text)
-    start = 0
+    sections = split_into_sections(text)
 
-    while start < text_length:
-        # Межа chunk-а "спочатку"
-        end = min(start + chunk_size, text_length)
+    for section in sections:
+        words = section.split()
+        start = 0
 
-        if end < text_length:
-            # Перевіряємо, чи не закінчуємо chunk всередині слова
-            # Якщо символ text[end] - не пробіл і не перевідрядка, рухаємося назад.
-            temp_end = end
-            while temp_end > start and not text[temp_end].isspace():
-                temp_end -= 1
-
-            # Якщо temp_end == start, це означає, що слово довше за chunk_size,
-            # тому відкотитися до пробілу неможливо - chunk візьме весь [start:end].
-            if temp_end > start:
-                end = temp_end
-
-        chunk = text[start:end].rstrip()  # strip вправо, щоб уникнути зайвих пробілів
-
-        # Додаємо, тільки якщо chunk непорожній
-        if chunk:
+        while start < len(words):
+            end = min(start + chunk_size, len(words))
+            chunk = " ".join(words[start:end])
             chunks.append(chunk)
-
-        # Якщо досягнули кінця тексту, завершуємо
-        if end >= text_length:
-            break
-
-        # Обчислюємо новий start з урахуванням overlap
-        # (якщо end == start + chunk_size, наступний початок = end - overlap)
-        start = max(end - overlap, end)  # щоб уникнути start < end
-
-        if start >= text_length:
-            break
+            start = max(end - overlap, end)
 
     return chunks
 
 
-def process_file(file_path: str,
-                 chunk_size: int = 2000,
-                 overlap: int = 200) -> list:
+
+def process_file(file_path: str, chunk_size: int = 500, overlap: int = 100) -> list:
     """
-    Залежно від розширення файлу (.docx або .pdf),
-    зчитує текст і нарізає його на chunk-и.
-    Повертає список рядків (кожен chunk).
+    Обробляє .docx або .pdf файли, додаючи підтримку таблиць для .docx.
     """
     base, ext = os.path.splitext(file_path)
     ext = ext.lower()
 
     if ext == ".docx":
-        text_data = read_docx(file_path)
+        text_data = read_docx_with_tables(file_path)  # Використовуємо нову функцію для .docx
     elif ext == ".pdf":
         text_data = read_pdf(file_path)
     else:
-        # Пропускаємо інші формати
         return []
 
     return chunk_text(text_data, chunk_size=chunk_size, overlap=overlap)
+
+
 
 def save_chunks_to_csv(chunks_info: list, csv_path: str):
     """
@@ -118,12 +139,14 @@ def save_chunks_to_csv(chunks_info: list, csv_path: str):
         for row in chunks_info:
             writer.writerow(row)
 
+
 def save_chunks_to_json(chunks_info: list, json_path: str):
     """
     Зберігає список словників (із ключами 'chunk' та 'source_file') у JSON (UTF-8).
     """
     with open(json_path, mode='w', encoding='utf-8') as f:
         json.dump(chunks_info, f, ensure_ascii=False, indent=2)
+
 
 def convert_csv_cp1251_to_utf8(src_path: str, dst_path: str):
     """
@@ -149,7 +172,6 @@ if __name__ == "__main__":
 
     all_chunks = []
 
-    # Обробляємо всі docx/pdf у папці raw_docs
     for filename in os.listdir(raw_docs_folder):
         if not filename.lower().endswith((".docx", ".pdf")):
             print(f"Пропускаємо непідтримуваний формат файлу: {filename}")
@@ -158,14 +180,13 @@ if __name__ == "__main__":
         file_path = os.path.join(raw_docs_folder, filename)
         print(f"Обробляємо файл: {file_path}")
 
-        chunks = process_file(file_path, chunk_size=2000, overlap=200)
+        chunks = process_file(file_path, chunk_size=500, overlap=100)
         for ch in chunks:
             all_chunks.append({
                 "chunk": ch,
                 "source_file": filename
             })
 
-    # Зберігаємо результати у CSV та JSON
     save_chunks_to_csv(all_chunks, csv_out)
     save_chunks_to_json(all_chunks, json_out)
 

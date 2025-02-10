@@ -7,28 +7,38 @@ from sentence_transformers import SentenceTransformer
 def create_faiss_index(
     input_path="data/processed/rag_chunks.json",
     input_format="json",  # 'json' або 'csv'
-    model_name="sentence-transformers/distiluse-base-multilingual-cased-v2",
+    model_name="intfloat/multilingual-e5-base",
     output_path="data/index/faiss_index",
     use_cosine=True
 ):
     """
-    1) Зчитує DataFrame з JSON або CSV (визначається параметром `input_format`).
+    1) Зчитує DataFrame з JSON або CSV (пріоритетно JSON).
     2) Якщо є колонка 'chunk', перейменовуємо на 'text_chunk'.
     3) Переконуємось, що є колонки 'text_chunk' і 'source_file'. За потреби створюємо 'chunk_id'.
     4) Обчислюємо ембеддинги за допомогою SentenceTransformer(model_name).
     5) Якщо use_cosine=True, нормалізуємо вектори (faiss.normalize_L2) і використовуємо IndexFlatIP (inner product).
-       Якщо use_cosine=False, використовуємо IndexFlatL2 (Eвклідова відстань).
+       Якщо use_cosine=False, використовуємо IndexFlatL2 (Евклідова відстань).
     6) Зберігаємо індекс у файл (faiss_index.index) та метадані у CSV (faiss_index_metadata.csv).
 
     Приклад виклику:
       python create_embeddings.py
     """
 
-    # 1) Читання JSON або CSV
-    if input_format == "csv":
-        df = pd.read_csv(input_path)
-    else:  # 'json'
+    # Видаляємо старі індекси та метадані
+    if os.path.exists(f"{output_path}.index"):
+        os.remove(f"{output_path}.index")
+        print(f"Видалено старий індекс: {output_path}.index")
+    if os.path.exists(f"{output_path}_metadata.csv"):
+        os.remove(f"{output_path}_metadata.csv")
+        print(f"Видалено старі метадані: {output_path}_metadata.csv")
+
+    # 1) Пріоритетно читаємо JSON, інакше CSV
+    if os.path.exists(input_path) and input_format == "json":
         df = pd.read_json(input_path, orient='records')
+    elif input_format == "csv":
+        df = pd.read_csv(input_path)
+    else:
+        raise FileNotFoundError(f"Файл {input_path} не знайдено або формат не підтримується.")
 
     # Якщо "chunk" - це текст, перейменовуємо на "text_chunk"
     if "chunk" in df.columns and "text_chunk" not in df.columns:
@@ -47,7 +57,7 @@ def create_faiss_index(
     print(f"Використовується модель ембеддингів: {model_name}")
 
     # 3) Обчислюємо ембеддинги
-    texts = df["text_chunk"].tolist()
+    texts = [f"passage: {text}" for text in df["text_chunk"].tolist()]
     embeddings = model.encode(texts, show_progress_bar=True)
     embeddings = np.array(embeddings, dtype="float32")
 
@@ -80,7 +90,7 @@ if __name__ == "__main__":
     create_faiss_index(
         input_path="data/processed/rag_chunks.json",
         input_format="json",
-        model_name="sentence-transformers/distiluse-base-multilingual-cased-v2",
+        model_name="intfloat/multilingual-e5-base",
         output_path="data/index/faiss_index",
         use_cosine=True
     )

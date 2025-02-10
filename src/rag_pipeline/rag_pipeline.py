@@ -9,7 +9,7 @@ class RAGPipeline:
     def __init__(self,
                  metadata_csv="data/index/faiss_index_metadata.csv",
                  faiss_index_path="data/index/faiss_index.index",
-                 embedding_model="sentence-transformers/distiluse-base-multilingual-cased-v2",
+                 embedding_model="intfloat/multilingual-e5-base",
                  cross_encoder_model="cross-encoder/ms-marco-MiniLM-L-12-v2",
                  bm25_enable=True,
                  re_ranker_enable=True,
@@ -31,10 +31,6 @@ class RAGPipeline:
         self.index = faiss.read_index(faiss_index_path)
 
         self.use_cosine = use_cosine
-        # Якщо use_cosine=True, тоді векторний пошук у FAISS видає
-        # "distance = 1 - similarity" чи "distance = -dot_product"?
-        # Для IndexFlatIP: FAISS повертає результати від "найменшого" значення
-        # (яке насправді = -найбільший dot product), такий фреймворк FAISS.
 
         # 4) BM25
         self.bm25_enable = bm25_enable
@@ -51,19 +47,17 @@ class RAGPipeline:
     def hybrid_search(self, query, top_k=5):
         """
         Двоетапний пошук:
-          1) BM25 => беремо top_n (100)
+          1) BM25 => беремо top_n (50)
           2) Векторний пошук серед цих top_n
         """
         if not self.bm25_enable:
-            # Якщо вимкнено BM25
             return self.vector_search(query, top_k=top_k)
 
-        # 1) BM25 -> топ-100
+        # 1) BM25 -> топ-50
         tokenized_query = query.split()
         scores = self.bm25.get_scores(tokenized_query)
-        # сортуємо за спаданням
         indices_sorted = np.argsort(scores)[::-1]
-        top_n = 100
+        top_n = 50
         top_n_indices = indices_sorted[:top_n]
 
         # 2) Векторний пошук серед цих 50
@@ -71,18 +65,19 @@ class RAGPipeline:
         sub_ids = top_n_indices
 
         # embed query
-        query_emb = self.model.encode([query])
+        formatted_query = f"query: {query}"
+        query_emb = self.model.encode([formatted_query])
         query_emb = np.array(query_emb, dtype="float32")
-        chunk_embs = self.model.encode(sub_texts)
+        query_emb /= np.linalg.norm(query_emb)
+
+        formatted_sub_texts = [f"passage: {text}" for text in sub_texts]
+        chunk_embs = self.model.encode(formatted_sub_texts)
         chunk_embs = np.array(chunk_embs, dtype="float32")
 
-        # косинусна подібність
         dot = np.sum(query_emb * chunk_embs, axis=1)
-        norm_q = np.linalg.norm(query_emb)
         norm_c = np.linalg.norm(chunk_embs, axis=1)
-        cos_sims = dot / (norm_q * norm_c)
+        cos_sims = dot / norm_c
 
-        # сортуємо за cos_sims спаданням
         cos_sims_sorted_idx = np.argsort(cos_sims)[::-1]
         final_indices = cos_sims_sorted_idx[:top_k]
 
@@ -96,33 +91,25 @@ class RAGPipeline:
                 "source_file": row["source_file"],
                 "text_chunk": row["text_chunk"]
             })
+        for idx_, res in enumerate(results):
+            print(f"Фрагмент {idx_ + 1}: Score = {res['score']:.4f}, Source = {res['source_file']}")
         return results
 
     def vector_search(self, query, top_k=5):
         """
         Прямий пошук у FAISS-індексі
-        Якщо use_cosine=True => index = IP => distance = -similarity
-        Якщо use_cosine=False => index = L2 => distance = евклідова відстань
-        У кожному разі FAISS повертає "найкращі" (мінімальні dist) першими.
         """
-        # embed запит
-        query_emb = self.model.encode([query], show_progress_bar=False)
+        formatted_query = f"query: {query}"
+        query_emb = self.model.encode([formatted_query], show_progress_bar=False)
         query_emb = np.array(query_emb, dtype="float32")
+        query_emb /= np.linalg.norm(query_emb)
 
-        # FAISS search
         distances, ids = self.index.search(query_emb, top_k)
-        # distances.shape = (1, top_k), ids.shape = (1, top_k)
 
         results = []
         for dist, idx_ in zip(distances[0], ids[0]):
             row = self.df.iloc[idx_]
-            # Якщо use_cosine=True (IndexFlatIP), dist = "distance" = negative dot product
-            # Ми можемо перетворити на "score" = -dist, щоб "більший" score = краща схожість
-            if self.use_cosine:
-                score = -dist  # оскільки IP = dot_product * (-1) => the smaller dist => the bigger dot => => score = -dist
-            else:
-                # L2 => менша dist => краща. Тож score = -dist, щоб більше = краще
-                score = -dist
+            score = -dist if self.use_cosine else -dist
 
             results.append({
                 "score": float(score),
@@ -131,8 +118,7 @@ class RAGPipeline:
                 "text_chunk": row["text_chunk"]
             })
 
-        # Вони вже прийшли в порядку від найменшого dist,
-        # тож від найбільшого score. Але надійніше ще раз відсортувати.
+        results = [r for r in results if r["score"] > 0.2]
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:top_k]
 
@@ -144,7 +130,7 @@ class RAGPipeline:
             return candidates
 
         pairs = [(query, c["text_chunk"]) for c in candidates]
-        scores = self.cross_encoder.predict(pairs)  # numpy array
+        scores = self.cross_encoder.predict(pairs)
 
         for i, sc in enumerate(scores):
             candidates[i]["re_rank_score"] = float(sc)
@@ -157,11 +143,11 @@ if __name__ == "__main__":
     pipeline = RAGPipeline(
         metadata_csv="data/index/faiss_index_metadata.csv",
         faiss_index_path="data/index/faiss_index.index",
-        embedding_model="sentence-transformers/distiluse-base-multilingual-cased-v2",
+        embedding_model="intfloat/multilingual-e5-base",
         cross_encoder_model="cross-encoder/ms-marco-MiniLM-L-12-v2",
         bm25_enable=True,
         re_ranker_enable=True,
-        use_cosine=True  # з урахуванням, що в create_embeddings.py теж було use_cosine=True
+        use_cosine=True
     )
 
     query = "Який обов’язок начальника сектору СЕД та УП?"
