@@ -1,102 +1,100 @@
+from dotenv import load_dotenv
+import os
+
 import gradio as gr
-import subprocess
+import openai
 import traceback
 
 from src.rag_pipeline.rag_pipeline import RAGPipeline
+# Завантаження змінних середовища з .env файлу
+load_dotenv()
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-MODEL_NAME = "mistral:7b-instruct"
+# Ім'я моделі для OpenAI API
+MODEL_NAME = "gpt-3.5-turbo"
 
 # Ініціалізуємо RAG-пайплайн
 rag = RAGPipeline(
     metadata_csv="data/index/faiss_index_metadata.csv",
     faiss_index_path="data/index/faiss_index.index",
-    embedding_model="intfloat/multilingual-e5-base",  # Додаємо нову модель
-    bm25_enable=True,
-    re_ranker_enable=True,
-    use_cosine=True
+    embedding_model="intfloat/multilingual-e5-base",  # Додаємо нову модель ембеддингу
+    bm25_enable=True,  # Увімкнено BM25 пошук для покращення результатів
+    re_ranker_enable=True,  # Увімкнено повторне ранжування результатів
+    use_cosine=True  # Використовується косинусна схожість для метрики
 )
+
 
 def build_instruct_prompt(fragments, user_query: str) -> str:
     """
     Формує prompt у форматі '### Instruction: ... ### Response:'
     Додаємо інструкцію про "строге цитування" chunks.
     """
-    # Об'єднаємо текст фрагментів
     fragments_text = "\n".join(
         f"- {frag['text_chunk']}" for frag in fragments
     )
-    return f"""### Instruction:
-Ти відповідаєш ВИКЛЮЧНО на основі наведених фрагментів, БЕЗ додавання вигаданих фактів.
-Якщо в тексті нижче відсутня потрібна інформація, напиши "Я не знаю".
+    return f"""Ти відповідаєш ВИКЛЮЧНО на основі наведених фрагментів, БЕЗ додавання вигаданих фактів.
+Якщо в тексті нижче відсутня потрібна інформація, напиши \"Я не знаю\".
 **Використовуй прямі цитати** (дослівно) з фрагментів. Не додавай власні припущення чи вигадану інформацію.
 
 Ось фрагменти:
 {fragments_text}
 
 Запит: {user_query}
-
-### Response:
 """
 
-def generate_ollama(prompt: str) -> str:
+
+def generate_openai(prompt: str) -> str:
     """
-    Викликає ollama з командою "run" і потрібною моделлю (mistral:7b-instruct).
+    Викликає OpenAI API для моделі GPT-3.5 Turbo.
     """
     try:
-        cmd = [
-            "ollama",
-            "run",
-            MODEL_NAME,
-            # Можна додати "--nopersist", якщо Ollama підтримує
-        ]
-        result = subprocess.run(
-            cmd,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            encoding="utf-8"
+        response = openai.ChatCompletion.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": "Ти корисний помічник."},
+                {"role": "user", "content": prompt}
+            ]
         )
-        if result.returncode != 0:
-            return f"Ollama error: {result.stderr}"
-        return result.stdout.strip()
+        return response.choices[0].message['content'].strip()
     except Exception as e:
-        return f"Error calling ollama: {e}"
+        return f"Error calling OpenAI API: {e}"
+
 
 def get_response(query: str):
+    """
+    Обробляє запит користувача, виконує пошук, повторне ранжування та генерує відповідь.
+    """
     if not query.strip():
         return ("Будь ласка, введіть запит", "")
 
     try:
-        # 1) Hybrid search з top_k=12 (замість 8), щоб зібрати більше кандидатів
+        # Пошук з використанням гібридного методу з top_k=20
         candidates = rag.hybrid_search(query, top_k=20)
         if not candidates:
             return "Нічого не знайдено для вашого запиту", ""
 
-        # 2) Re-rank
+        # Повторне ранжування кандидатів
         candidates = rag.re_rank(query, candidates)
-        # Після re-rank беремо, скажімо, top-8
-        # (бо хотіли збільшити re-rank)
-        # Потім ще відфільтруємо
         top_candidates = candidates[:8]
 
-        # 3) Фільтруємо за score > 0.2 (або 0.15, 0.25 — налаштуйте)
+        # Фільтрація результатів за порогом схожості
         filtered = [c for c in top_candidates if c["score"] > 0.3]
         if len(filtered) < 3:
-            # якщо надто агресивна фільтрація — fallback
             filtered = top_candidates
 
-        # 4) Залишимо в prompt top-5 фрагментів
+        # Вибір топ-5 фрагментів для формування prompt
         top_fragments = filtered[:5]
 
-        # 5) Формуємо "строге" інструкції
+        # Формування інструкційного prompt
         prompt = build_instruct_prompt(top_fragments, query)
         print("==== PROMPT ====")
         print(prompt)
         print("================")
 
-        answer = generate_ollama(prompt)
+        # Виклик моделі GPT-3.5 Turbo
+        answer = generate_openai(prompt)
 
-        # Формуємо список джерел
+        # Формування списку джерел
         sources_md = "### Список джерел та оцінки схожості\n"
         for frag in top_fragments:
             sources_md += f"- [{frag['source_file']}](raw_docs/{frag['source_file']}) (Схожість: {frag['score']:.2f})\n"
@@ -107,17 +105,19 @@ def get_response(query: str):
         traceback.print_exc()
         return f"Сталася помилка: {e}", ""
 
-# Gradio UI
+
+# Налаштування Gradio інтерфейсу
 iface = gr.Interface(
     fn=get_response,
     inputs=gr.Textbox(label="Введіть запит"),
     outputs=[
-        gr.Textbox(label="Відповідь від Ollama (Mistral)"),
+        gr.Textbox(label="Відповідь від GPT-3.5 Turbo"),
         gr.Markdown(label="Список джерел")
     ],
-    title="RAG Pipeline Demo (Ollama, Mistral Instruct)",
+    title="RAG Pipeline Demo (GPT-3.5 Turbo)",
     description="Збільшили top_k для re-ranker, посилили prompt (строге цитування)."
 )
 
+# Запуск додатку
 if __name__ == "__main__":
     iface.launch()
